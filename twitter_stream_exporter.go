@@ -91,7 +91,15 @@ func NewExporter(c twitterConfig) (*Exporter, error) {
 		StallWarnings: twitter.Bool(true),
 	}
 
-	s, err := getTwitterClient(c).Streams.Filter(fp)
+	tClient := getTwitterClient(c)
+	_, resp, err := tClient.Search.Tweets(&twitter.SearchTweetParams{
+		Query: "Monzo",
+	})
+	if err != nil {
+		log.Fatalf("Could not connect to the API! Error: %+v, response: %+v", resp, err)
+	}
+
+	s, err := tClient.Streams.Filter(fp)
 	if err != nil {
 		return nil, err
 	}
@@ -100,8 +108,12 @@ func NewExporter(c twitterConfig) (*Exporter, error) {
 
 	d := twitter.NewSwitchDemux()
 	d.Tweet = e.parseTweet
+	d.StreamDisconnect = handleDisconnect
+	d.Warning = handleWarning
+	d.Other = logEvent
 	go d.HandleChan(e.stream.Messages)
 
+	log.Printf("Connected to the twitter streaming API, tracking %s\n", c.track)
 	return &e, nil
 }
 
@@ -121,6 +133,18 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	e.wordMentions.Describe(ch)
 }
 
+func handleWarning(warning *twitter.StallWarning) {
+	logEvent(warning)
+}
+
+func handleDisconnect(disconnect *twitter.StreamDisconnect) {
+	logEvent(disconnect)
+}
+
+func logEvent(event interface{}) {
+	log.Printf("Non-tweet event: %T %+v\n", event, event)
+}
+
 // parseTweet reads a single tweet and increments the appropriate counters.
 func (e *Exporter) parseTweet(t *twitter.Tweet) {
 	var rt string
@@ -132,6 +156,8 @@ func (e *Exporter) parseTweet(t *twitter.Tweet) {
 		rt = "false"
 		s = t
 	}
+
+	log.Printf("New tweet from @%s: '%s' (created at %s)\n", t.User.ScreenName, t.Text, t.CreatedAt)
 
 	e.matchingTweets.WithLabelValues(rt).Inc()
 
@@ -198,8 +224,10 @@ func main() {
 	prometheus.MustRegister(bi)
 	bi.WithLabelValues(Version, CommitSHA1, BuildDate, runtime.Version()).Set(1)
 
-	log.Printf("Starting twitter_stream_exporter %s (build date: %s) (sha1: %s)\n", Version, BuildDate, CommitSHA1)
-	log.Printf("Metrics are avaiable at %s%s", *listenAddress, *metricsPath)
+	log.Printf("Starting monzo/twitter_stream_exporter %s (build date: %s) (sha1: %s)\n", Version, BuildDate, CommitSHA1)
+	log.Printf("Using access token %s and consumer key %s", c.accessToken, c.consumerKey)
+	log.Printf("Using token secret %s and consumer secret %s", c.tokenSecret, c.consumerSecret)
+	log.Printf("Metrics are avaiable at %s%s\n", *listenAddress, *metricsPath)
 
 	http.Handle(*metricsPath, promhttp.Handler())
 	s := &http.Server{Addr: *listenAddress}
